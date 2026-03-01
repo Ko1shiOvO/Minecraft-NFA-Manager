@@ -1,7 +1,10 @@
 {
-  "name": "koishi-plugin-nfa",
-  "description": "nfa",
+  "name": "Microsoft nfa manager",
+  "description": "Microsoft的NFA管理器",
   "version": "0.0.1",
+  "contributors": {
+    "Ko1shiOvO": "https://github.com/Ko1shiOvO"
+  },
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -17,6 +20,6 @@
   ],
   "devDependencies": {},
   "peerDependencies": {
-    "koishi": "^4.18.7"
+    "koishi": "^4.18.11"
   }
 }
