@@ -1,6 +1,6 @@
 import { Context, Schema, Tables } from 'koishi'
 
-export const name = 'nfa'
+export const name = 'mc-nfa-manager'
 
 export interface Config {
   maxFreeCount?: number // 每个用户免费获取NFA账号的次数
@@ -11,6 +11,8 @@ export const Config: Schema<Config> = Schema.object({
   maxFreeCount: Schema.number().default(1).description('每个用户免费获取NFA账号的次数'),
   admins: Schema.array(Schema.string()).default([]).description('插件管理员列表，userId 数组'),
 })
+
+export const inject = ['database']
 
 declare module 'koishi' {
   interface Tables {
@@ -51,7 +53,7 @@ export interface NfaAdmin {
 export function apply(ctx: Context, config: Config) {
   // 初始化数据库表
   ctx.model.extend('nfa_accounts', {
-    id: 'unsigned',
+    id: { type: 'unsigned', initial: 1 },
     account: 'string',
     password: 'string',
     mcName: 'string',
@@ -61,23 +63,23 @@ export function apply(ctx: Context, config: Config) {
     status: 'string',
     createdAt: 'timestamp',
     updatedAt: 'timestamp',
-  })
+  }, { primary: 'id', autoInc: true })
 
   ctx.model.extend('nfa_usage', {
-    id: 'unsigned',
+    id: { type: 'unsigned', initial: 1 },
     userId: 'string',
     platformId: 'string',
     accountId: 'unsigned',
     usedAt: 'timestamp',
-  })
+  }, { primary: 'id', autoInc: true })
 
   // 插件管理员表（可动态管理）
   ctx.model.extend('nfa_admins', {
-    id: 'unsigned',
+    id: { type: 'unsigned', initial: 1 },
     userId: 'string',
     platform: 'string',
     addedAt: 'timestamp',
-  })
+  }, { primary: 'id', autoInc: true })
 
   // 解析管理员标识，支持 'platform:userId' 或单独 userId（则使用当前 session.platform 或 'any'）
   function parseAdminInput(input: string | undefined, sessionPlatform?: string) {
@@ -159,26 +161,59 @@ export function apply(ctx: Context, config: Config) {
       return ok('NFA账号获取成功！\n' + formatAccount(acc))
     })
 
-  // 管理：添加 NFA（归入 nfa.add）
-  ctx.command('nfa.add <account> <password> <mcName> [banStatus] [hypLevel] [capes]', { authority: 4 })
+  // 管理：添加 NFA（支持两种模式：自动解析或手动输入）
+  ctx.command('nfa.add [input...]', { authority: 4 })
     .alias('addnfa')
     .alias('添加NFA')
-    .action(async ({ session }, account: string, password: string, mcName: string, banStatus?: string, hypLevel?: string, capes?: string) => {
+    .action(async ({ session }, ...args: string[]) => {
       if (!await isNfaAdmin(session)) return err('需要 NFA 管理员权限')
+      
+      if (!args || args.length === 0) return err('用法: addnfa <格式化字符串> 或 addnfa <account> <password> <mcName> [banStatus] [hypLevel]')
+
+      let account: string | undefined
+      let password: string | undefined
+      let mcName: string | undefined
+      let banStatus: string = 'unban'
+      let hypLevel: number = 0
+
+      // 先尝试作为格式化字符串解析（包含 @ 和 McName）
+      const fullInput = args.join(' ')
+      if (fullInput.includes('@') && fullInput.toUpperCase().includes('MCNAME')) {
+        // 格式化字符串模式
+        const parsed = parseNfaString(fullInput)
+        if (parsed && parsed.account && parsed.password && parsed.mcName) {
+          account = parsed.account
+          password = parsed.password
+          mcName = parsed.mcName
+          banStatus = parsed.banStatus || 'unban'
+          hypLevel = parsed.hypLevel || 0
+        } else {
+          return err('解析失败或缺少必要信息（账号、密码、MC昵称）')
+        }
+      } else {
+        // 手动输入模式：account password mcName [banStatus] [hypLevel]
+        if (args.length < 3) {
+          return err('手动模式需要至少 3 个参数: account password mcName [banStatus] [hypLevel]')
+        }
+        account = args[0]
+        password = args[1]
+        mcName = args[2]
+        if (args[3]) banStatus = args[3] === 'ban' ? 'ban' : 'unban'
+        if (args[4]) hypLevel = Math.max(0, parseInt(args[4]) || 0)
+      }
+
       if (!account || !password || !mcName) return err('参数不完整：account password mcName 必填')
+
       const existing = await ctx.database.get('nfa_accounts', { account })
       if (existing.length > 0) return err(`账号 ${account} 已存在`)
-
-      const parsedHyp = Math.max(0, parseInt(hypLevel || '0') || 0)
-      const finalBan = banStatus === 'ban' ? 'ban' : 'unban'
 
       await ctx.database.create('nfa_accounts', {
         account,
         password,
         mcName,
-        banStatus: finalBan,
-        hypLevel: parsedHyp,
-        capes: capes || '无',
+        banStatus: banStatus as 'unban' | 'ban',
+        hypLevel,
+        capes: '无',
         status: 'available',
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -319,12 +354,16 @@ export function apply(ctx: Context, config: Config) {
   ].join('\n')
 
   async function recordUsageAndRemove(accountId: number, userId: string, platformId: string) {
-    await ctx.database.create('nfa_usage', {
-      userId,
-      platformId,
-      accountId,
-      usedAt: new Date(),
-    })
+    try {
+      await ctx.database.create('nfa_usage', {
+        userId,
+        platformId,
+        accountId,
+        usedAt: new Date(),
+      })
+    } catch (e) {
+      ctx.logger.warn('Failed to record NFA usage:', e)
+    }
     await ctx.database.remove('nfa_accounts', { id: accountId })
   }
 
@@ -348,59 +387,94 @@ export function apply(ctx: Context, config: Config) {
     return false
   }
 
-  // 解析 NFA 字串（统一实现，使用更稳健的简单解析以避免正则截断问题）
+  // 解析 NFA 字串（只提取：封禁状态、等级、mcName、账号、密码）
   function parseNfaString(s: string) {
     const src = (s || '').trim()
     if (!src) return null
-    const item: Partial<NfaAccount> = {
-      banStatus: 'unban',
-      hypLevel: 0,
-      capes: '无',
-    }
 
-    // 优先按第一个 ':' 分割为 account:password 形式
-    const idx = src.indexOf(':')
-    if (idx > 0) {
-      item.account = src.slice(0, idx).trim()
-      // 密码截取到第一个空白或 '|' 或 '[' 前
-      const rest = src.slice(idx + 1).trim()
-      const pw = rest.split(/\s|\||\[/)[0]
-      item.password = pw || ''
+    const item: Partial<NfaAccount> = {}
+
+    // 1. 提取 [unban] 或 [ban]
+    if (/\[unban\]/i.test(src)) {
+      item.banStatus = 'unban'
+    } else if (/\[ban\]/i.test(src)) {
+      item.banStatus = 'ban'
     } else {
-      // 若无冒号，尝试匹配邮箱或取第一个 token
-      const emailMatch = src.match(/[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}/)
-      if (emailMatch) item.account = emailMatch[0]
-      else item.account = src.split(/\s|\||\[/)[0]
+      item.banStatus = 'unban'
     }
 
-    // MC 昵称: 支持 McName:Name 或 |McName:Name 或 McName=Name
-    const mcMatch = src.match(/McName[:=]\s*([^\]|\s\[]+)/i) || src.match(/\|?McName[:=]\s*([^\]|\s\[]+)/i)
-    if (mcMatch) item.mcName = mcMatch[1].trim()
+    // 2. 提取 [数字] - 取第一个数字括号
+    const levelMatch = src.match(/\[(\d+)\]/)
+    item.hypLevel = levelMatch ? parseInt(levelMatch[1], 10) : 0
 
-    // 披风
-    const capMatch = src.match(/Capes[:=]\s*([^\]]+)/i) || src.match(/\[Capes:([^\]]+)\]/i)
-    if (capMatch) item.capes = capMatch[1].trim()
+    // 3. 提取 McName - 关键：先找到 McName 标记，然后提取值
+    const mcNameIdx = src.indexOf('McName')
+    if (mcNameIdx !== -1) {
+      // 找到冒号或等号
+      const colonIdx = src.indexOf(':', mcNameIdx)
+      const eqIdx = src.indexOf('=', mcNameIdx)
+      const startIdx = Math.max(colonIdx, eqIdx)
 
-    // 封禁状态
-    if (/\bban\b/i.test(src)) item.banStatus = 'ban'
-    else if (/\bunban\b/i.test(src)) item.banStatus = 'unban'
-
-    // 方括号内数字作为 hyp 等级
-    const numBracket = src.match(/\[(\d+)\]/)
-    if (numBracket) item.hypLevel = parseInt(numBracket[1], 10) || 0
-
-    // 备用：从管道部分提取 mcName
-    if (!item.mcName) {
-      const pipe = src.match(/\|\s*([^\[]+)/)
-      if (pipe) {
-        const part = pipe[1].trim()
-        const m = part.match(/McName[:=]\s*([^\]]+)/i)
-        if (m) item.mcName = m[1].trim()
+      if (startIdx !== -1) {
+        // 从冒号/等号后开始，找到第一个空格、管道符或括号，就是 McName 的结尾
+        let endIdx = src.length
+        for (let i = startIdx + 1; i < src.length; i++) {
+          if (src[i] === ' ' || src[i] === '|' || src[i] === '[') {
+            endIdx = i
+            break
+          }
+        }
+        item.mcName = src.substring(startIdx + 1, endIdx).trim()
       }
     }
 
-    if (!item.account) return null
-    if (!item.password) item.password = ''
+    // 4. 提取账号和密码 - 关键：先去掉所有开头的 [xxx] 前缀
+    // 找到第一个不是 [ 的字符位置
+    let contentStart = 0
+    while (contentStart < src.length && src[contentStart] === '[') {
+      const closeIdx = src.indexOf(']', contentStart)
+      if (closeIdx === -1) break
+      contentStart = closeIdx + 1
+    }
+    const cleanedStr = src.substring(contentStart).trim()
+
+    // 现在在清理后的字符串中查找 email:password
+    // 逐个字符扫描，找 @ 符号，然后向前向后扩展以获得完整的 email 和 password
+    const atIdx = cleanedStr.indexOf('@')
+    if (atIdx !== -1) {
+      // 向前找邮箱起点（找第一个非法邮箱字符）
+      let emailStart = 0
+      for (let i = atIdx - 1; i >= 0; i--) {
+        if (!/[\w.%+-]/.test(cleanedStr[i])) {
+          emailStart = i + 1
+          break
+        }
+      }
+
+      // 向后找邮箱结尾（到冒号）
+      const colonIdx2 = cleanedStr.indexOf(':', atIdx)
+      if (colonIdx2 !== -1) {
+        item.account = cleanedStr.substring(emailStart, colonIdx2).trim()
+
+        // 密码：从冒号后开始，到空格/管道符/括号为止
+        let pwdStart = colonIdx2 + 1
+        let pwdEnd = cleanedStr.length
+        for (let i = pwdStart; i < cleanedStr.length; i++) {
+          if (cleanedStr[i] === ' ' || cleanedStr[i] === '|' || cleanedStr[i] === '[') {
+            pwdEnd = i
+            break
+          }
+        }
+        item.password = cleanedStr.substring(pwdStart, pwdEnd).trim()
+      }
+    }
+
+    // 验证必要字段都存在
+    if (!item.account || !item.password || !item.mcName) {
+      return null
+    }
+
+    item.capes = '无'
     return item
   }
 }

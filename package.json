@@ -1,7 +1,7 @@
 {
-  "name": "Microsoft nfa manager",
+  "name": "koishi-plugin-microsoft-nfa-manager",
   "description": "Microsoft的NFA管理器",
-  "version": "0.0.1",
+  "version": "1.0.1",
   "contributors": {
     "Ko1shiOvO": "https://github.com/Ko1shiOvO"
   },
@@ -12,6 +12,10 @@
     "dist"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ko1shiOvO/Microsoft-NFA-Manager/"
+  },
   "scripts": {},
   "keywords": [
     "chatbot",
