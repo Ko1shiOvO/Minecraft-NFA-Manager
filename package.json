@@ -1,7 +1,7 @@
 {
-  "name": "koishi-plugin-microsoft-nfa-manager",
-  "description": "Microsoft的NFA管理器",
-  "version": "1.0.1",
+  "name": "koishi-plugin-minecraft-nfa-manager",
+  "description": "Minecraft的NFA管理器",
+  "version": "1.0.2",
   "contributors": {
     "Ko1shiOvO": "https://github.com/Ko1shiOvO"
   },
@@ -14,7 +14,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Ko1shiOvO/Microsoft-NFA-Manager/"
+    "url": "https://github.com/Ko1shiOvO/Minecraft-NFA-Manager/"
   },
   "scripts": {},
   "keywords": [
